@@ -11,6 +11,8 @@
   --moss: #6d965a;
   --teal: #4f9da6;
   --red: #b95045;
+  --amber: #c47b3c;
+  --violet: #8a6ccf;
   --stone: #77736a;
   --shadow: 0 14px 38px rgb(0 0 0 / 0.35);
   font-family:
@@ -216,6 +218,59 @@ legend {
   font-weight: 700;
 }
 
+.phase-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgb(32 33 29 / 0.88);
+}
+
+.phase-panel p,
+.phase-panel strong {
+  font-size: 0.9rem;
+}
+
+.phase-panel p {
+  color: var(--muted);
+}
+
+.phase-panel strong {
+  color: var(--gold);
+}
+
+.phase-rail {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.phase-rail span {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px;
+  color: var(--muted);
+  background: var(--surface-2);
+  text-align: center;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.phase-rail span.done {
+  border-color: #526d47;
+  color: #cce0bf;
+  background: #293727;
+}
+
+.phase-rail span.current {
+  border-color: var(--gold);
+  color: #17140c;
+  background: var(--gold);
+}
+
 .main-grid {
   display: grid;
   grid-template-columns: 280px minmax(380px, 1fr) 320px;
@@ -363,6 +418,18 @@ legend {
   box-shadow: inset 0 0 0 3px rgb(109 150 90 / 0.32);
 }
 
+.hex-cell.selectable {
+  cursor: pointer;
+}
+
+.hex-cell.selected {
+  z-index: 8;
+  border-color: #f4efe0;
+  box-shadow:
+    inset 0 0 0 3px rgb(244 239 224 / 0.62),
+    0 0 0 3px rgb(0 0 0 / 0.35);
+}
+
 .hex-cell.attackable {
   border-color: var(--red);
   background: #49302d;
@@ -380,6 +447,27 @@ legend {
 
 .hex-cell.stairs {
   background: #273d3f;
+}
+
+.hex-cell.stairs-active {
+  border-color: var(--moss);
+  background: #2f4a34;
+}
+
+.hex-cell.chest-cell {
+  background: #463726;
+}
+
+.hex-cell.monster-cell {
+  background: #3f2b2a;
+}
+
+.hex-cell.paladin-cell {
+  background: #403a27;
+}
+
+.hex-cell.squire-cell {
+  background: #263f42;
 }
 
 .wall-mark {
@@ -424,7 +512,7 @@ legend {
 }
 
 .token.chest path {
-  fill: #c47b3c;
+  fill: var(--amber);
 }
 
 .token.stairs path {
@@ -434,6 +522,103 @@ legend {
 .control-panel {
   display: grid;
   gap: 10px;
+}
+
+.attack-summary,
+.attack-preview,
+.inspect-stats,
+.mini-grid,
+.summary-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.attack-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.attack-summary span,
+.attack-preview,
+.inspect-stats span,
+.mini-grid span,
+.mini-grid strong,
+.summary-grid span,
+.summary-grid strong {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px;
+  background: var(--surface-2);
+  font-size: 0.82rem;
+}
+
+.attack-preview {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.attack-preview strong {
+  color: var(--gold);
+  font-size: 1.35rem;
+}
+
+.attack-preview span:last-child {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.inspect-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.inspect-panel > strong {
+  font-size: 1.05rem;
+}
+
+.inspect-panel > span,
+.inspect-panel p,
+.inspect-key {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.inspect-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.inspect-stats strong {
+  color: var(--gold);
+}
+
+.inspect-panel.hero {
+  border-color: var(--gold);
+}
+
+.inspect-panel.monster {
+  border-color: var(--red);
+}
+
+.inspect-panel.chest {
+  border-color: var(--amber);
+}
+
+.inspect-panel.stairs {
+  border-color: var(--moss);
+}
+
+.ai-panel .mini-grid,
+.summary-grid {
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+}
+
+.mini-grid span,
+.summary-grid span {
+  color: var(--muted);
+}
+
+.mini-grid strong,
+.summary-grid strong {
+  overflow-wrap: anywhere;
 }
 
 .terminal-panel p {
@@ -457,10 +642,13 @@ legend {
   grid-template-columns: 38px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
+  width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 8px;
+  color: var(--text);
   background: var(--surface-2);
+  text-align: left;
 }
 
 .monster-row .token {
@@ -487,6 +675,10 @@ legend {
   padding-left: 20px;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.chest-choice button {
+  justify-content: flex-start;
 }
 
 @media (max-width: 1180px) {
@@ -529,6 +721,11 @@ legend {
   .board-wrap {
     max-width: 100%;
   }
+
+  .phase-rail,
+  .attack-summary {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 460px) {
@@ -544,5 +741,13 @@ legend {
   .available-grid strong,
   .available-grid span {
     text-align: center;
+  }
+
+  .phase-rail,
+  .attack-summary,
+  .inspect-stats,
+  .ai-panel .mini-grid,
+  .summary-grid {
+    grid-template-columns: 1fr;
   }
 }

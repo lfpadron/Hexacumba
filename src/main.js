@@ -3,20 +3,28 @@ import {
   createNewGame,
   deserializeState,
   endHeroAttack,
+  finishTurn,
   getAdjacentMonsterIds,
+  getExpectedAction,
   getNearestMonsterId,
   getPaladinReachable,
   getPhaseLabel,
   heroAttackMonster,
+  inspectCell,
   movePaladin,
   PHASES,
+  previewHeroAttack,
+  resolveMonsterTurn,
+  resolvePendingChestChoice,
+  resolveSquireMove,
+  rollForTurn,
   serializeState,
   setSquireCommand,
+  TURN_FLOW,
   useItem,
 } from "./gameState.js";
-import { hexDistance } from "./hexGrid.js";
 
-const SAVE_KEY = "hexacumba-save-v1";
+const SAVE_KEY = "hexacumba-save-v2";
 const app = document.querySelector("#app");
 
 let state = null;
@@ -26,10 +34,12 @@ const ui = {
   attackTargetId: null,
   attackSource: "paladin",
   attackPreference: "paladin-first",
+  selectedCell: null,
 };
 
 function localLog(message) {
   if (!state) return;
+  state.lastMessage = message;
   state.log = [message, ...(state.log ?? [])].slice(0, 80);
 }
 
@@ -48,6 +58,11 @@ function loadSavedState() {
 function normalizeSelections() {
   if (!state) return;
 
+  const boardKeys = new Set(state.board.cells.map((cell) => cell.key));
+  if (!ui.selectedCell || !boardKeys.has(ui.selectedCell)) {
+    ui.selectedCell = state.heroes.paladin.position;
+  }
+
   if (!ui.commandMonsterId || !state.monsters.some((monster) => monster.id === ui.commandMonsterId)) {
     ui.commandMonsterId = getNearestMonsterId(state, state.heroes.paladin.position);
   }
@@ -56,12 +71,33 @@ function normalizeSelections() {
   if (!adjacent.includes(ui.attackTargetId)) {
     ui.attackTargetId = adjacent[0] ?? state.monsters[0]?.id ?? null;
   }
+
+  if (ui.attackSource === "combined" && !heroesAdjacent()) {
+    ui.attackSource = "paladin";
+  }
+}
+
+function heroesAdjacent() {
+  if (!state) return false;
+  const paladin = state.heroes.paladin.position;
+  const squire = state.heroes.squire.position;
+  if (!paladin || !squire) return false;
+  const [pq, pr] = paladin.split(",").map(Number);
+  const [sq, sr] = squire.split(",").map(Number);
+  const ds = -pq - pr - (-sq - sr);
+  return (Math.abs(pq - sq) + Math.abs(pr - sr) + Math.abs(ds)) / 2 === 1;
 }
 
 function saveGame() {
   if (!state) return;
   localStorage.setItem(SAVE_KEY, serializeState(state));
   localLog("Partida guardada en este navegador.");
+  render();
+}
+
+function deleteSavedGame() {
+  localStorage.removeItem(SAVE_KEY);
+  if (state) localLog("Partida guardada borrada.");
   render();
 }
 
@@ -73,12 +109,15 @@ function startNewGame() {
     paladinAvatar: data.get("paladinAvatar") || "macho",
     squireAvatar: data.get("squireAvatar") || "macho",
   });
+  ui.selectedCell = state.heroes.paladin.position;
   normalizeSelections();
   render();
 }
 
 function continueGame() {
-  state = loadSavedState();
+  const loaded = loadSavedState();
+  if (!loaded) return;
+  state = loaded;
   normalizeSelections();
   render();
 }
@@ -115,6 +154,7 @@ function renderSetup() {
         <div class="setup-actions">
           <button type="button" class="primary" data-action="new-game">Nueva partida</button>
           <button type="button" data-action="continue" ${hasSave ? "" : "disabled"}>Continuar partida</button>
+          <button type="button" data-action="delete-save" ${hasSave ? "" : "disabled"}>Borrar guardado</button>
         </div>
       </form>
     </main>
@@ -122,8 +162,6 @@ function renderSetup() {
 }
 
 function renderGame() {
-  const roundLabel = `Ronda ${state.round}/12`;
-  const levelLabel = `Nivel ${state.level}`;
   return `
     <main class="app-shell game-shell">
       <header class="topbar">
@@ -132,26 +170,30 @@ function renderGame() {
           <h1>Paladin y Escudero</h1>
         </div>
         <div class="status-strip">
-          <span>${roundLabel}</span>
-          <span>${levelLabel}</span>
+          <span>Ronda ${state.round}/12</span>
+          <span>Nivel ${state.level}</span>
           <span>${getPhaseLabel(state.phase)}</span>
         </div>
         <div class="top-actions">
-          <button type="button" data-action="save">Guardar</button>
-          <button type="button" data-action="continue">Continuar</button>
-          <button type="button" data-action="reset">Nueva</button>
+          <button type="button" data-action="reset">Nueva partida</button>
+          <button type="button" data-action="save">Guardar partida</button>
+          <button type="button" data-action="continue" ${localStorage.getItem(SAVE_KEY) ? "" : "disabled"}>Continuar partida</button>
+          <button type="button" data-action="delete-save" ${localStorage.getItem(SAVE_KEY) ? "" : "disabled"}>Borrar guardado</button>
         </div>
       </header>
+      ${renderPhaseRail()}
       <section class="main-grid">
         <aside class="side-panel">
           ${renderHeroCard("paladin")}
           ${renderHeroCard("squire")}
+          ${renderSelectionPanel()}
         </aside>
         <section class="board-panel">
           ${renderBoard()}
         </section>
         <aside class="side-panel">
           ${renderControls()}
+          ${renderSquireAiPanel()}
           ${renderMonsterList()}
           ${renderLog()}
         </aside>
@@ -160,9 +202,30 @@ function renderGame() {
   `;
 }
 
+function renderPhaseRail() {
+  const currentIndex = TURN_FLOW.indexOf(state.phase);
+  const labels = TURN_FLOW.map((phase, index) => {
+    const className =
+      phase === state.phase
+        ? "current"
+        : currentIndex > index || (currentIndex === -1 && state.phase !== PHASES.ROUND_COMPLETE)
+          ? "done"
+          : "";
+    return `<span class="${className}">${getPhaseLabel(phase)}</span>`;
+  }).join("");
+
+  return `
+    <section class="phase-panel">
+      <div class="phase-rail">${labels}</div>
+      <p>${getExpectedAction(state)}</p>
+      ${state.lastMessage ? `<strong>${state.lastMessage}</strong>` : ""}
+    </section>
+  `;
+}
+
 function renderHeroCard(heroId) {
   const hero = state.heroes[heroId];
-  const dice = state.dice[heroId];
+  const dice = state.dice?.[heroId] ?? { mobility: 0, attack: 0, defense: 0 };
   const available = state.available[heroId];
   const avatarLabel =
     heroId === "paladin"
@@ -174,12 +237,12 @@ function renderHeroCard(heroId) {
         : "Perro";
 
   return `
-    <section class="panel hero-panel ${heroId}">
+    <section class="panel hero-panel ${heroId}" data-select-cell="${hero.position}">
       <div class="panel-title">
         ${tokenSvg(heroId, heroId === "paladin" ? "P" : "E")}
         <div>
           <h2>${hero.name}</h2>
-          <p>${avatarLabel}</p>
+          <p>${avatarLabel} | ${hero.vitality > 0 ? "Activo" : "Fuera de combate"}</p>
         </div>
       </div>
       <div class="vitality" aria-label="Vitalidad">${renderHearts(hero.vitality, hero.maxVitality)}</div>
@@ -204,8 +267,8 @@ function renderHeroCard(heroId) {
           hero.inventory.length
             ? hero.inventory
                 .map(
-                  (item) => `
-                    <button type="button" class="item-button" data-use-item="${item.id}" data-hero="${heroId}" title="${item.description}">
+                  (item, index) => `
+                    <button type="button" class="item-button" data-use-item-index="${index}" data-hero="${heroId}" title="${item.description}">
                       ${item.name}
                     </button>
                   `,
@@ -258,12 +321,19 @@ function renderBoard() {
       const monster = state.monsters.find((entry) => entry.position === cell.key);
       const hero = Object.values(state.heroes).find((entry) => entry.position === cell.key);
       const isStairs = board.stairs === cell.key;
+      const selected = ui.selectedCell === cell.key;
       const classes = [
         "hex-cell",
         wall ? "wall" : "",
         isStairs ? "stairs" : "",
-        reachable.has(cell.key) ? "reachable" : "",
-        attackable.has(cell.key) ? "attackable" : "",
+        isStairs && state.phase === PHASES.STAIRS ? "stairs-active" : "",
+        chest ? "chest-cell" : "",
+        monster ? "monster-cell" : "",
+        hero?.id === "paladin" ? "paladin-cell" : "",
+        hero?.id === "squire" ? "squire-cell" : "",
+        reachable.has(cell.key) ? "reachable selectable" : "",
+        attackable.has(cell.key) ? "attackable selectable" : "",
+        selected ? "selected" : "",
       ]
         .filter(Boolean)
         .join(" ");
@@ -303,16 +373,8 @@ function getHexSize(side) {
 }
 
 function renderCellTitle(key) {
-  const parts = [`Casilla ${key}`];
-  if (state.board.walls.includes(key)) parts.push("Muro");
-  if (state.board.stairs === key) parts.push("Escaleras");
-  const chest = state.chests.find((entry) => entry.position === key && !entry.opened);
-  if (chest) parts.push("Cofre");
-  const monster = state.monsters.find((entry) => entry.position === key);
-  if (monster) parts.push(`${monster.name} (${monster.vitality} PV)`);
-  const hero = Object.values(state.heroes).find((entry) => entry.position === key);
-  if (hero) parts.push(hero.name);
-  return parts.join(" | ");
+  const info = inspectCell(state, key);
+  return `${info.name} | ${info.type} | ${info.state}`;
 }
 
 function tokenSvg(kind, label) {
@@ -325,13 +387,45 @@ function tokenSvg(kind, label) {
   `;
 }
 
+function renderSelectionPanel() {
+  const info = inspectCell(state, ui.selectedCell);
+  const statRows =
+    info.kind === "hero" || info.kind === "monster"
+      ? `
+        <div class="inspect-stats">
+          <span>PV <strong>${info.vitality}/${info.maxVitality}</strong></span>
+          <span>Mov <strong>${info.mobility}</strong></span>
+          <span>Ata <strong>${info.attack}</strong></span>
+          <span>Def <strong>${info.defense}</strong></span>
+        </div>
+      `
+      : "";
+
+  return `
+    <section class="panel inspect-panel ${info.kind}">
+      <h2>Casilla seleccionada</h2>
+      <p class="inspect-key">${info.key}</p>
+      <strong>${info.name}</strong>
+      <span>${info.type}</span>
+      ${statRows}
+      <p>${info.state}</p>
+    </section>
+  `;
+}
+
 function renderControls() {
+  if (state.pendingChestChoice) return renderPendingChestChoice();
+
   if (state.phase === PHASES.VICTORY || state.phase === PHASES.DEFEAT) {
+    return renderTerminalPanel();
+  }
+
+  if (state.phase === PHASES.ROLL) {
     return `
-      <section class="panel control-panel terminal-panel">
-        <h2>${state.phase === PHASES.VICTORY ? "Victoria" : "Derrota"}</h2>
-        <p>${state.phase === PHASES.VICTORY ? "La ronda 12 fue despejada." : "El Paladin llego a 0 vitalidad."}</p>
-        <button type="button" class="primary" data-action="reset">Nueva partida</button>
+      <section class="panel control-panel">
+        <h2>Tirada</h2>
+        <p>Prepara los dados del Paladin y del Escudero.</p>
+        <button type="button" class="primary" data-action="roll">Tirar dados</button>
       </section>
     `;
   }
@@ -360,38 +454,53 @@ function renderControls() {
   if (state.phase === PHASES.MOVE) {
     return `
       <section class="panel control-panel">
-        <h2>Movimiento</h2>
-        <p>Selecciona una casilla resaltada para mover al Paladin.</p>
+        <h2>Movimiento del Paladin</h2>
+        <p>Casillas verdes: movilidad actual ${state.available.paladin.mobility}.</p>
         <button type="button" data-cell="${state.heroes.paladin.position}">Quedarse aqui</button>
       </section>
     `;
   }
 
-  if (state.phase === PHASES.ATTACK) {
-    const adjacent = state.monsters.filter((monster) => getAdjacentMonsterIds(state).has(monster.id));
+  if (state.phase === PHASES.SQUIRE_MOVE) {
     return `
       <section class="panel control-panel">
-        <h2>Ataque humano</h2>
-        <label>Objetivo
-          <select data-bind="attackTargetId" ${adjacent.length ? "" : "disabled"}>
-            ${adjacent.length ? adjacent.map((monster) => monsterOption(monster, ui.attackTargetId)).join("") : "<option>Sin objetivos adyacentes</option>"}
-          </select>
-        </label>
-        <label>Fuente
-          <select data-bind="attackSource">
-            <option value="paladin" ${ui.attackSource === "paladin" ? "selected" : ""}>Paladin</option>
-            <option value="squire" ${ui.attackSource === "squire" ? "selected" : ""}>Escudero</option>
-            <option value="combined" ${ui.attackSource === "combined" ? "selected" : ""}>Combinado</option>
-          </select>
-        </label>
-        <label>Gastar primero
-          <select data-bind="attackPreference" ${ui.attackSource === "combined" ? "" : "disabled"}>
-            <option value="paladin-first" ${ui.attackPreference === "paladin-first" ? "selected" : ""}>Paladin</option>
-            <option value="squire-first" ${ui.attackPreference === "squire-first" ? "selected" : ""}>Escudero</option>
-          </select>
-        </label>
-        <button type="button" class="primary" data-action="attack" ${adjacent.length ? "" : "disabled"}>Atacar</button>
-        <button type="button" data-action="end-attack">Terminar ataque</button>
+        <h2>Movimiento del Escudero</h2>
+        <p>Orden actual: ${state.command.type}. Obedece con 75% de probabilidad.</p>
+        <button type="button" class="primary" data-action="resolve-squire">Resolver Escudero</button>
+      </section>
+    `;
+  }
+
+  if (state.phase === PHASES.ATTACK) {
+    return renderAttackControls();
+  }
+
+  if (state.phase === PHASES.MONSTER_TURN) {
+    return `
+      <section class="panel control-panel">
+        <h2>Turno de monstruos</h2>
+        <p>Resolveran movimiento, objetivo y ataque.</p>
+        <button type="button" class="primary" data-action="resolve-monsters">Resolver monstruos</button>
+      </section>
+    `;
+  }
+
+  if (state.phase === PHASES.END_TURN) {
+    return `
+      <section class="panel control-panel">
+        <h2>Fin de turno</h2>
+        <p>Turnos jugados: ${state.stats.turnsPlayed}</p>
+        <button type="button" class="primary" data-action="finish-turn">Nueva tirada</button>
+      </section>
+    `;
+  }
+
+  if (state.phase === PHASES.STAIRS) {
+    return `
+      <section class="panel control-panel">
+        <h2>Escaleras</h2>
+        <p>Ronda limpia. Selecciona la casilla de escaleras o usa el boton.</p>
+        <button type="button" class="primary" data-action="enter-stairs">Ir a escaleras</button>
       </section>
     `;
   }
@@ -401,6 +510,95 @@ function renderControls() {
       <h2>Mejoras</h2>
       ${state.pendingUpgrades.map((heroId) => renderUpgradeControl(heroId)).join("")}
     </section>
+  `;
+}
+
+function renderAttackControls() {
+  const adjacent = state.monsters.filter((monster) => getAdjacentMonsterIds(state).has(monster.id));
+  const preview = ui.attackTargetId
+    ? previewHeroAttack(state, ui.attackTargetId, ui.attackSource)
+    : { hits: 0, attackPoints: 0, defeated: false, valid: false };
+  const combinedReady = heroesAdjacent();
+
+  return `
+    <section class="panel control-panel">
+      <h2>Ataque humano</h2>
+      <div class="attack-summary">
+        <span>Paladin: ${state.available.paladin.attack}</span>
+        <span>Escudero: ${state.available.squire.attack}</span>
+        <span>Combinado: ${combinedReady ? "listo" : "requiere adyacencia"}</span>
+      </div>
+      <label>Objetivo
+        <select data-bind="attackTargetId" ${adjacent.length ? "" : "disabled"}>
+          ${adjacent.length ? adjacent.map((monster) => monsterOption(monster, ui.attackTargetId)).join("") : "<option>Sin objetivos adyacentes</option>"}
+        </select>
+      </label>
+      <label>Fuente
+        <select data-bind="attackSource">
+          <option value="paladin" ${ui.attackSource === "paladin" ? "selected" : ""}>Paladin</option>
+          <option value="squire" ${ui.attackSource === "squire" ? "selected" : ""}>Escudero</option>
+          <option value="combined" ${ui.attackSource === "combined" ? "selected" : ""} ${combinedReady ? "" : "disabled"}>Combinado</option>
+        </select>
+      </label>
+      <label>Gastar primero
+        <select data-bind="attackPreference" ${ui.attackSource === "combined" ? "" : "disabled"}>
+          <option value="paladin-first" ${ui.attackPreference === "paladin-first" ? "selected" : ""}>Paladin</option>
+          <option value="squire-first" ${ui.attackPreference === "squire-first" ? "selected" : ""}>Escudero</option>
+        </select>
+      </label>
+      <div class="attack-preview">
+        <strong>${preview.hits}</strong>
+        <span>impacto(s) posibles con ${preview.attackPoints} ataque</span>
+        <span>${preview.defeated ? "Derrota al objetivo" : "No derrota aun"}</span>
+      </div>
+      <button type="button" class="primary" data-action="attack" ${adjacent.length && preview.valid ? "" : "disabled"}>Atacar</button>
+      <button type="button" data-action="end-attack">Terminar ataque</button>
+    </section>
+  `;
+}
+
+function renderPendingChestChoice() {
+  const pending = state.pendingChestChoice;
+  const hero = state.heroes[pending.heroId];
+  return `
+    <section class="panel control-panel chest-choice">
+      <h2>Inventario lleno</h2>
+      <p>${hero.name} encontro ${pending.item.name}.</p>
+      <button type="button" data-action="discard-pending">Descartar objeto nuevo</button>
+      ${hero.inventory
+        .map(
+          (item, index) => `
+            <button type="button" data-action="replace-pending" data-index="${index}">
+              Reemplazar ${item.name}
+            </button>
+          `,
+        )
+        .join("")}
+    </section>
+  `;
+}
+
+function renderTerminalPanel() {
+  const victory = state.phase === PHASES.VICTORY;
+  return `
+    <section class="panel control-panel terminal-panel">
+      <h2>${victory ? "Victoria" : "Derrota"}</h2>
+      <p>${victory ? "La Hexacumba queda sellada." : "El Paladin llego a 0 vitalidad."}</p>
+      ${renderSummary()}
+      <button type="button" class="primary" data-action="reset">Nueva partida</button>
+    </section>
+  `;
+}
+
+function renderSummary() {
+  return `
+    <div class="summary-grid">
+      <span>Rondas</span><strong>${state.stats.roundsCompleted}</strong>
+      <span>Monstruos</span><strong>${state.stats.monstersDefeated}</strong>
+      <span>Cofres</span><strong>${state.stats.chestsOpened}</strong>
+      <span>Objetos</span><strong>${state.stats.objectsUsed}</strong>
+      <span>Turnos</span><strong>${state.stats.turnsPlayed}</strong>
+    </div>
   `;
 }
 
@@ -429,6 +627,21 @@ function monsterOption(monster, selectedId) {
   `;
 }
 
+function renderSquireAiPanel() {
+  const ai = state.lastSquireAi;
+  return `
+    <section class="panel ai-panel">
+      <h2>Escudero AI</h2>
+      <div class="mini-grid">
+        <span>Orden</span><strong>${ai?.order ?? "Sin resolver"}</strong>
+        <span>Resultado</span><strong>${ai ? (ai.obeyed ? "Obedecio" : "Desobedecio") : "-"}</strong>
+        <span>Motivo</span><strong>${ai?.reason ?? "-"}</strong>
+        <span>Ruta</span><strong>${ai ? `${ai.from} -> ${ai.to}` : "-"}</strong>
+      </div>
+    </section>
+  `;
+}
+
 function renderMonsterList() {
   return `
     <section class="panel monster-panel">
@@ -438,13 +651,13 @@ function renderMonsterList() {
           ? state.monsters
               .map(
                 (monster) => `
-                  <div class="monster-row">
+                  <button type="button" class="monster-row" data-select-cell="${monster.position}">
                     ${tokenSvg("monster", monster.marker)}
                     <div>
                       <strong>${monster.name}</strong>
                       <span>PV ${monster.vitality}/${monster.maxVitality} | Mov ${monster.mobility} | Ata ${monster.attack} | Def ${monster.defense}</span>
                     </div>
-                  </div>
+                  </button>
                 `,
               )
               .join("")
@@ -465,9 +678,24 @@ function renderLog() {
   `;
 }
 
+function handleCellClick(key) {
+  ui.selectedCell = key;
+  const monster = state.monsters.find((entry) => entry.position === key);
+  if (monster) ui.attackTargetId = monster.id;
+
+  if (state.phase === PHASES.MOVE) {
+    movePaladin(state, key);
+  } else if (state.phase === PHASES.STAIRS && key === state.board.stairs) {
+    movePaladin(state, key);
+  }
+
+  render();
+}
+
 document.addEventListener("click", (event) => {
   const actionButton = event.target.closest("[data-action]");
-  const itemButton = event.target.closest("[data-use-item]");
+  const itemButton = event.target.closest("[data-use-item-index]");
+  const selectCellButton = event.target.closest("[data-select-cell]");
   const cellButton = event.target.closest("[data-cell]");
 
   if (actionButton) {
@@ -475,8 +703,13 @@ document.addEventListener("click", (event) => {
     if (action === "new-game") startNewGame();
     if (action === "continue") continueGame();
     if (action === "save") saveGame();
+    if (action === "delete-save") deleteSavedGame();
     if (action === "reset") {
       state = null;
+      render();
+    }
+    if (action === "roll") {
+      rollForTurn(state);
       render();
     }
     if (action === "confirm-command") {
@@ -484,6 +717,10 @@ document.addEventListener("click", (event) => {
         type: ui.commandType,
         monsterId: ui.commandMonsterId,
       });
+      render();
+    }
+    if (action === "resolve-squire") {
+      resolveSquireMove(state);
       render();
     }
     if (action === "attack") {
@@ -494,24 +731,51 @@ document.addEventListener("click", (event) => {
       endHeroAttack(state);
       render();
     }
+    if (action === "resolve-monsters") {
+      resolveMonsterTurn(state);
+      render();
+    }
+    if (action === "finish-turn") {
+      finishTurn(state);
+      render();
+    }
+    if (action === "enter-stairs") {
+      movePaladin(state, state.board.stairs);
+      ui.selectedCell = state.heroes.paladin.position;
+      render();
+    }
+    if (action === "discard-pending") {
+      resolvePendingChestChoice(state, "discard");
+      render();
+    }
+    if (action === "replace-pending") {
+      resolvePendingChestChoice(state, "replace", Number(actionButton.dataset.index));
+      render();
+    }
     if (action === "upgrade") {
       const heroId = actionButton.dataset.hero;
       const select = document.querySelector(`[data-upgrade-stat="${heroId}"]`);
       applyUpgrade(state, heroId, select.value);
+      ui.selectedCell = state.heroes.paladin.position;
       render();
     }
     return;
   }
 
   if (itemButton && state) {
-    useItem(state, itemButton.dataset.hero, itemButton.dataset.useItem);
+    useItem(state, itemButton.dataset.hero, Number(itemButton.dataset.useItemIndex));
     render();
     return;
   }
 
-  if (cellButton && state?.phase === PHASES.MOVE) {
-    movePaladin(state, cellButton.dataset.cell);
+  if (selectCellButton && state) {
+    ui.selectedCell = selectCellButton.dataset.selectCell;
     render();
+    return;
+  }
+
+  if (cellButton && state) {
+    handleCellClick(cellButton.dataset.cell);
   }
 });
 
